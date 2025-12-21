@@ -11,7 +11,7 @@ class Blob extends Model
         'data',
     ];
 
-    protected $casts = [
-        'data' => 'string', // Will be base64 encoded binary
-    ];
+    // protected $casts = [
+    //     'data' => 'string',
+    // ];
 }

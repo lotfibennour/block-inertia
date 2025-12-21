@@ -41,7 +41,11 @@ class EditorController extends Controller
         // Get all updates grouped by document
         $updates = DocumentUpdate::all()->groupBy('doc_id')->map(function ($group) {
             return $group->map(function ($update) {
-                return $update->data; // base64 encoded
+                $data = $update->data;
+                if (is_resource($data)) {
+                    $data = stream_get_contents($data);
+                }
+                return base64_encode($data);
             })->values();
         });
 
@@ -82,6 +86,13 @@ class EditorController extends Controller
             'data' => 'required|string', // base64 encoded
         ]);
 
+        // Decode base64 to binary stream
+        $binaryData = base64_decode($validated['data']);
+        $stream = fopen('php://memory', 'r+');
+        fwrite($stream, $binaryData);
+        rewind($stream);
+        $validated['data'] = $stream;
+
         DocumentUpdate::create($validated);
 
         return response()->json(['success' => true]);
@@ -96,6 +107,13 @@ class EditorController extends Controller
             'blob_id' => 'required|string',
             'data' => 'required|string', // base64 encoded
         ]);
+
+        // Decode base64 to binary stream
+        $binaryData = base64_decode($validated['data']);
+        $stream = fopen('php://memory', 'r+');
+        fwrite($stream, $binaryData);
+        rewind($stream);
+        $validated['data'] = $stream;
 
         Blob::updateOrCreate(
             ['blob_id' => $validated['blob_id']],
@@ -116,9 +134,12 @@ class EditorController extends Controller
             abort(404);
         }
 
-        $binaryData = base64_decode($blob->data);
+        $data = $blob->data;
+        if (is_resource($data)) {
+            $data = stream_get_contents($data);
+        }
 
-        return response($binaryData)
+        return response($data)
             ->header('Content-Type', 'application/octet-stream');
     }
 

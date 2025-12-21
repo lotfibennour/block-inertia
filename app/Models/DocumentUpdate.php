@@ -12,9 +12,9 @@ class DocumentUpdate extends Model
         'data',
     ];
 
-    protected $casts = [
-        'data' => 'string', // Will be base64 encoded binary
-    ];
+    // protected $casts = [
+    //     'data' => 'string',
+    // ];
 
     /**
      * Get the document this update belongs to.
