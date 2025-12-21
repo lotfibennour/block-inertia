@@ -13,6 +13,7 @@ interface SidebarItemProps {
     onDelete: (doc: Doc) => void;
     currentDocId?: string;
     onSelect: (doc: Doc) => void;
+    onCreateSubDoc: (parentId: string) => void;
 }
 
 const SidebarItem = ({
@@ -25,6 +26,7 @@ const SidebarItem = ({
     onDelete,
     currentDocId,
     onSelect,
+    onCreateSubDoc,
 }: SidebarItemProps) => {
     // Find children for this doc
     const children = useMemo(() => {
@@ -65,6 +67,17 @@ const SidebarItem = ({
                 </span>
 
                 <button
+                    className="opacity-0 group-hover:opacity-100 p-1 hover:bg-gray-200 text-gray-400 hover:text-gray-900 rounded transition-opacity"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        onCreateSubDoc(doc.id);
+                    }}
+                    title="Add sub-document"
+                >
+                    <Plus size={12} />
+                </button>
+
+                <button
                     className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-100 text-gray-400 hover:text-red-500 rounded transition-opacity"
                     onClick={(e) => {
                         e.stopPropagation();
@@ -77,7 +90,8 @@ const SidebarItem = ({
             </div>
 
             {!isCollapsed && hasChildren && (
-                <div className="sidebar-children">
+                <div className="sidebar-children relative">
+                    <div className="absolute left-4 top-0 bottom-0 w-[1px] bg-gray-200" style={{ left: `${depth * 12 + 15}px`, top: '4px', bottom: '4px' }} />
                     {children.map((child) => (
                         <SidebarItem
                             key={child.id}
@@ -90,6 +104,7 @@ const SidebarItem = ({
                             onDelete={onDelete}
                             currentDocId={currentDocId}
                             onSelect={onSelect}
+                            onCreateSubDoc={onCreateSubDoc}
                         />
                     ))}
                 </div>
@@ -102,42 +117,79 @@ const Sidebar = () => {
     const context = useEditor();
     const [docs, setDocs] = useState<Doc[]>([]);
     const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+    const [localParentMap, setLocalParentMap] = useState<Map<string, string | null>>(new Map());
 
-    // Build parent map from initialData
-    const parentMap = useMemo(() => {
-        const map = new Map<string, string | null>();
+    // Initialize parent map from initialData
+    useEffect(() => {
         if (context?.initialData?.documents) {
+            const map = new Map<string, string | null>();
             context.initialData.documents.forEach(d => {
                 map.set(d.doc_id, d.root_doc_id);
             });
+            setLocalParentMap(map);
         }
-        return map;
     }, [context?.initialData]);
 
     useEffect(() => {
         if (!context?.provider || !context?.editor) return;
         const { collection } = context.provider;
-        const updateDocs = () => {
-            const docs = [...collection.docs.values()].map((blocks) =>
-                blocks.getDoc(),
-            );
-            setDocs(docs);
+        const { editor } = context;
+
+        const handleSubDocs = (arg0: any) => {
+            if (!arg0 || !arg0.added) return;
+            arg0.added.forEach((yDoc: any) => {
+                const parentId = context.provider?.activeDocId || null;
+                setLocalParentMap(prev => {
+                    const next = new Map(prev);
+                    next.set(yDoc.guid, parentId);
+                    return next;
+                });
+            });
+            updateDocs();
         };
+
+        const updateDocs = () => {
+            if (!collection) return;
+            const newDocs = Array.from(collection.docs.values()).map(d => d.getDoc());
+            setDocs(newDocs);
+        };
+
         updateDocs();
 
-        const disposable = [
+        const disposables = [
             collection.slots.docUpdated.on(updateDocs),
-            context.editor.slots.docLinkClicked.on(updateDocs),
+            editor.slots.docLinkClicked.on(updateDocs),
         ];
 
-        return () => disposable.forEach((d) => d.dispose());
+        // Y.js events need manual unregistration
+        collection.doc.on('subdocs', handleSubDocs);
+
+        return () => {
+            disposables.forEach(d => {
+                if (d && 'dispose' in d) d.dispose();
+            });
+            collection.doc.off('subdocs', handleSubDocs);
+        };
     }, [context?.provider, context?.editor]);
 
-    const handleCreateDoc = useCallback(() => {
+    const handleCreateDoc = useCallback((parentId?: string) => {
         if (!context?.provider) return;
         const { collection } = context.provider;
 
+        // Set parent for the upcoming subdocs event (caught by our internal listener too)
+        context.provider.activeDocId = parentId || null;
+
         const newDoc = collection.createDoc();
+
+        // Optimistically update local parent map if we have parentId
+        if (parentId) {
+            setLocalParentMap(prev => {
+                const next = new Map(prev);
+                next.set(newDoc.id, parentId);
+                return next;
+            });
+        }
+
         newDoc.load(() => {
             const pageBlockId = newDoc.addBlock('affine:page', {});
             newDoc.addBlock('affine:surface', {}, pageBlockId);
@@ -148,6 +200,7 @@ const Sidebar = () => {
 
         if (context.editor) {
             context.editor.doc = newDoc;
+            context.provider.activeDocId = newDoc.id;
         }
     }, [context?.provider, context?.editor]);
 
@@ -161,10 +214,13 @@ const Sidebar = () => {
     const handleSelect = useCallback((doc: Doc) => {
         if (context?.editor) {
             context.editor.doc = doc;
-            // Force update
+            if (context.provider) {
+                context.provider.activeDocId = doc.id;
+            }
+            // Trigger local state update to reflect selection in sidebar (isActive)
             setDocs(prev => [...prev]);
         }
-    }, [context?.editor]);
+    }, [context?.editor, context?.provider]);
 
     const handleDelete = useCallback(async (doc: Doc) => {
         if (!confirm(`Are you sure you want to delete "${doc.meta?.title || 'Untitled'}" and all its sub-documents?`)) {
@@ -180,47 +236,73 @@ const Sidebar = () => {
             });
 
             if (!response.ok) {
-                console.error('Failed to delete document from backend');
-                alert('Failed to delete document');
+                const data = await response.json();
+                console.error('Failed to delete document from backend:', data.error);
+                alert(`Failed to delete document: ${data.error || 'Unknown error'}`);
                 return;
             }
 
             if (context?.provider?.collection) {
                 const { collection } = context.provider;
 
-                const removeDocRecursively = (targetDoc: Doc) => {
-                    // Find children using our map
-                    const children = docs.filter(d => parentMap.get(d.id) === targetDoc.id);
-                    children.forEach(removeDocRecursively);
-                    collection.removeDoc(targetDoc.id);
+                // Collect all IDs to remove (including children)
+                const idsToRemove = new Set<string>();
+                const collectIdsRecursively = (targetDoc: Doc) => {
+                    idsToRemove.add(targetDoc.id);
+                    const children = docs.filter(d => localParentMap.get(d.id) === targetDoc.id);
+                    children.forEach(collectIdsRecursively);
                 };
+                collectIdsRecursively(doc);
 
-                removeDocRecursively(doc);
+                // Remove from collection
+                idsToRemove.forEach(id => {
+                    try {
+                        collection.removeDoc(id);
+                    } catch (e) {
+                        console.warn(`Could not remove doc ${id} from collection:`, e);
+                    }
+                });
+
+                // Update local parent map
+                setLocalParentMap(prev => {
+                    const next = new Map(prev);
+                    idsToRemove.forEach(id => next.delete(id));
+                    return next;
+                });
+
+                // Update docs state
+                setDocs(prev => prev.filter(d => !idsToRemove.has(d.id)));
+
+                // If we deleted the active doc, switch to another one
+                if (context.editor && idsToRemove.has(context.editor.doc?.id || '')) {
+                    const remainingDocs = docs.filter(d => !idsToRemove.has(d.id));
+                    if (remainingDocs.length > 0) {
+                        context.editor.doc = remainingDocs[0];
+                        context.provider.activeDocId = remainingDocs[0].id;
+                    }
+                }
             }
-
-            // Reload page to refresh structure (simplest way to sync parentMap and state)
-            window.location.reload();
 
         } catch (error) {
             console.error('Error deleting document:', error);
             alert('Error deleting document');
         }
-    }, [context?.provider, docs, parentMap]);
+    }, [context?.provider, context?.editor, docs, localParentMap]);
 
     const rootDocs = useMemo(() => {
         return docs.filter((d) => {
-            const parentId = parentMap.get(d.id);
+            const parentId = localParentMap.get(d.id);
             // Root doc has no parent, OR parent is not in our known list (top level orphan)
             return !parentId || !docs.find(existing => existing.id === parentId);
         });
-    }, [docs, parentMap]);
+    }, [docs, localParentMap]);
 
     return (
         <div className="editor-sidebar flex flex-col h-full border-r border-gray-200 bg-gray-50/50">
             <div className="p-4 border-b border-gray-200 bg-white flex items-center justify-between">
                 <h2 className="text-sm font-semibold text-gray-900">Documents</h2>
                 <button
-                    onClick={handleCreateDoc}
+                    onClick={() => handleCreateDoc()}
                     className="p-1 hover:bg-gray-100 rounded text-gray-600 hover:text-gray-900 transition-colors"
                     title="New Document"
                 >
@@ -235,11 +317,12 @@ const Sidebar = () => {
                         doc={doc}
                         allDocs={docs}
                         collapsed={collapsed}
-                        parentMap={parentMap}
+                        parentMap={localParentMap}
                         onToggle={handleToggle}
                         onDelete={handleDelete}
                         currentDocId={context?.editor?.doc?.id}
                         onSelect={handleSelect}
+                        onCreateSubDoc={(id) => handleCreateDoc(id)}
                     />
                 ))}
 

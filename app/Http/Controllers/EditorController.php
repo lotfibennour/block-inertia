@@ -65,7 +65,7 @@ class EditorController extends Controller
     {
         $validated = $request->validate([
             'doc_id' => 'required|string',
-            'root_doc_id' => 'required|string',
+            'root_doc_id' => 'nullable|string',
         ]);
 
         Document::updateOrCreate(
@@ -168,25 +168,30 @@ class EditorController extends Controller
      */
     public function deleteDocument(string $docId): JsonResponse
     {
-        $document = Document::where('doc_id', $docId)->first();
+        try {
+            $document = Document::where('doc_id', $docId)->first();
 
-        if (!$document) {
-            return response()->json(['error' => 'Document not found'], 404);
+            if (!$document) {
+                return response()->json(['error' => 'Document not found in database'], 404);
+            }
+
+            $this->deleteDocumentRecursive($document);
+
+            return response()->json(['success' => true]);
+        } catch (\Exception $e) {
+            \Log::error('Error deleting document: ' . $e->getMessage());
+            return response()->json(['error' => 'Server error during deletion: ' . $e->getMessage()], 500);
         }
-
-        // Recursive deletion is handled by the model event or we do it manually here.
-        // Since we didn't define a cascade on delete in migration (assumption based on task)
-        // We will manually fetch children and delete them.
-        
-        $this->deleteDocumentRecursive($document);
-
-        return response()->json(['success' => true]);
     }
 
     private function deleteDocumentRecursive(Document $doc)
     {
-        // 1. Delete children
-        foreach ($doc->children as $child) {
+        // 1. Delete children (avoid infinite recursion if root_doc_id == doc_id)
+        $children = Document::where('root_doc_id', $doc->doc_id)
+            ->where('doc_id', '!=', $doc->doc_id)
+            ->get();
+
+        foreach ($children as $child) {
             $this->deleteDocumentRecursive($child);
         }
 

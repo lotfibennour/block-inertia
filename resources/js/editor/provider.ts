@@ -107,6 +107,7 @@ const client = new BackendClient();
 
 export class CollectionProvider {
     collection!: DocCollection;
+    activeDocId: string | null = null;
 
     static async init(initialData: EditorInitialData) {
         const hasData =
@@ -184,7 +185,8 @@ export class CollectionProvider {
 
         collection.doc.on('subdocs', (subdocs: { added: Set<Y.Doc> }) => {
             subdocs.added.forEach((doc: Y.Doc) => {
-                client.storeDocument(doc.guid, collection.id);
+                const parentId = this.activeDocId || collection.id;
+                client.storeDocument(doc.guid, parentId);
                 this._connectSubDoc(doc);
             });
         });
@@ -194,6 +196,10 @@ export class CollectionProvider {
         doc.on('update', async (update: Uint8Array) => {
             client.storeUpdate(doc.guid, update);
         });
+    }
+
+    public async storeDocument(docId: string, parentId: string) {
+        await client.storeDocument(docId, parentId);
     }
 }
 
