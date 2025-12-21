@@ -15,6 +15,7 @@ Route::get('/', function () {
 Route::get('editor', [EditorController::class, 'index'])->name('editor');
 Route::post('editor/documents', [EditorController::class, 'storeDocument'])->name('editor.documents.store');
 Route::post('editor/updates', [EditorController::class, 'storeUpdate'])->name('editor.updates.store');
+Route::delete('editor/documents/{docId}', [EditorController::class, 'deleteDocument'])->name('editor.documents.delete');
 Route::post('editor/blobs', [EditorController::class, 'storeBlob'])->name('editor.blobs.store');
 Route::get('editor/blobs/{blobId}', [EditorController::class, 'getBlob'])->name('editor.blobs.get');
 Route::delete('editor/blobs/{blobId}', [EditorController::class, 'deleteBlob'])->name('editor.blobs.delete');

@@ -68,7 +68,7 @@ class EditorController extends Controller
             'root_doc_id' => 'required|string',
         ]);
 
-        Document::firstOrCreate(
+        Document::updateOrCreate(
             ['doc_id' => $validated['doc_id']],
             ['root_doc_id' => $validated['root_doc_id']]
         );
@@ -161,6 +161,40 @@ class EditorController extends Controller
         $blobIds = Blob::pluck('blob_id');
 
         return response()->json(['blobs' => $blobIds]);
+    }
+
+    /**
+     * Delete a document and its sub-documents recursively.
+     */
+    public function deleteDocument(string $docId): JsonResponse
+    {
+        $document = Document::where('doc_id', $docId)->first();
+
+        if (!$document) {
+            return response()->json(['error' => 'Document not found'], 404);
+        }
+
+        // Recursive deletion is handled by the model event or we do it manually here.
+        // Since we didn't define a cascade on delete in migration (assumption based on task)
+        // We will manually fetch children and delete them.
+        
+        $this->deleteDocumentRecursive($document);
+
+        return response()->json(['success' => true]);
+    }
+
+    private function deleteDocumentRecursive(Document $doc)
+    {
+        // 1. Delete children
+        foreach ($doc->children as $child) {
+            $this->deleteDocumentRecursive($child);
+        }
+
+        // 2. Delete updates for this doc
+        DocumentUpdate::where('doc_id', $doc->doc_id)->delete();
+
+        // 3. Delete the doc itself
+        $doc->delete();
     }
 
     /**

@@ -29,6 +29,7 @@ export const EditorProvider = ({
             value={{
                 editor,
                 provider,
+                initialData,
             }}
         >
             {editor && provider ? children : <div className="editor-loading">Loading Editor...</div>}
