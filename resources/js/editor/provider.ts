@@ -274,9 +274,11 @@ export class CollectionProvider {
         await client.storeDocument(docId, parentId);
     }
 
-    public async deleteDocument(docId: string) {
+    public async deleteDocument(docId: string, childrenIds: string[] = []) {
+        const allIds = [docId, ...childrenIds];
+
         // 1. Mark as deleted to prevent further updates from being synced
-        this.deletedDocIds.add(docId);
+        allIds.forEach(id => this.deletedDocIds.add(id));
 
         // 2. Delete from backend
         // We do this BEFORE removing from collection to ensure backend is consistent
@@ -284,10 +286,12 @@ export class CollectionProvider {
         // For now, if it fails, we throw and let UI handle it.
         await client.deleteDocument(docId);
 
-        // 3. Remove from local Y.js collection
-        if (this.collection.docs.has(docId)) {
-            this.collection.removeDoc(docId);
-        }
+        // 3. Remove all from local Y.js collection
+        allIds.forEach(id => {
+            if (this.collection.docs.has(id)) {
+                this.collection.removeDoc(id);
+            }
+        });
     }
 }
 

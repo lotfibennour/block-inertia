@@ -182,21 +182,12 @@ const Sidebar = () => {
         const { collection } = context.provider;
         const collectionId = collection.id;
 
-        console.log('Collection ID:', collectionId);
-        console.log('Collection type:', collection.constructor.name);
-        console.log('Collection docs count before:', collection.docs.size);
-
-        // Set activeDocId to the PARENT (or collection ID for root-level docs)
+        // Set activeDocId to the PARENT until new doc is created
         context.provider.activeDocId = parentId || collectionId;
 
-        // Diagnostic log for schema
-        // @ts-ignore
-        console.log('Schema blocks count:', collection.schema.flavourSchemaMap?.size || 'unknown');
-
         const newDocId = crypto.randomUUID();
-        console.log('Attempting to create doc with UUID:', newDocId);
 
-        // Create the new document with explicit ID to ensure success
+        // Create the new document
         let newDoc;
         try {
             newDoc = collection.createDoc({ id: newDocId });
@@ -204,28 +195,7 @@ const Sidebar = () => {
             console.error('createDoc threw:', error);
         }
 
-        if (!newDoc) {
-            console.error('Failed to create new doc (returned null)');
-            // Attempt to diagnose
-            // @ts-ignore
-            if (collection.hasDoc && collection.hasDoc(newDocId)) {
-                console.warn('Collection says it HAS the doc, trying getDoc');
-                newDoc = collection.getDoc(newDocId);
-            } else {
-                // @ts-ignore
-                const docFromGet = collection.getDoc(newDocId);
-                if (docFromGet) {
-                    console.warn('hasDoc was false but getDoc returned it');
-                    newDoc = docFromGet;
-                } else {
-                    console.error('Collection does not have the doc');
-                }
-            }
-        }
-
-        if (!newDoc) {
-            return;
-        }
+        if (!newDoc) return;
 
         console.log('New Doc Created (Confirmed):', newDoc.id);
 
@@ -251,6 +221,27 @@ const Sidebar = () => {
             });
             newDoc.resetHistory();
 
+            // INSERT LINK IN PARENT DOC if applicable
+            if (parentId) {
+                const parentDoc = collection.getDoc(parentId);
+                if (parentDoc) {
+                    parentDoc.load(); // Ensure loaded
+                    // @ts-ignore - BlockSuite internal types for blocks map
+                    const blocks = parentDoc.blocks ? Array.from(parentDoc.blocks.values()) : [];
+                    // @ts-ignore
+                    const noteBlock = blocks.find(b => b.flavour === 'affine:note');
+
+                    if (noteBlock) {
+                        try {
+                            // Use embed-linked-doc to mimic slash command "New Subdocument"
+                            parentDoc.addBlock('affine:embed-linked-doc', { pageId: newDoc.id }, noteBlock.id);
+                        } catch (err) {
+                            console.error('Failed to add subdoc link to parent:', err);
+                        }
+                    }
+                }
+            }
+
             // NOW set the active document
             if (context.editor) {
                 context.editor.doc = newDoc;
@@ -258,21 +249,17 @@ const Sidebar = () => {
                 context.setActiveDocId?.(newDoc.id);
 
                 // Force update sidebar docs list
-                // We use setTimeout to ensure Y.js has processed the addition if strictly async
                 setTimeout(() => {
+                    // @ts-ignore
                     const refreshedDocs = Array.from(collection.docs.values()).map(d => d.getDoc());
-                    // Ensure new doc is in the list (sometimes delay in Yjs map)
                     if (!refreshedDocs.find(d => d.id === newDoc.id)) {
-                        console.warn('New doc not in collection.docs yet, manually forcing add');
                         refreshedDocs.push(newDoc);
                     }
-                    console.log('Refreshing docs list, count:', refreshedDocs.length);
                     setDocs(refreshedDocs);
                 }, 50);
             }
         } catch (e) {
             console.error('Failed to init/store new document:', e);
-            // Optionally remove from collection if failed
             try {
                 collection.removeDoc(newDoc.id);
             } catch (cleanupErr) {
@@ -354,7 +341,9 @@ const Sidebar = () => {
             // Actually, if we remove the root from collection, children are effectively removed from view 
             // (though they might exist in Yjs map structure).
 
-            await context.provider.deleteDocument(doc.id);
+            // Exclude the root doc itself from the children list
+            const childrenToRemove = Array.from(idsToRemove).filter(id => id !== doc.id);
+            await context.provider.deleteDocument(doc.id, childrenToRemove);
 
             // Note: Since backend does recursive delete, we don't strictly need to call deleteDocument 
             // on children for the BACKEND, but we might want to for the "stop syncing" part.
