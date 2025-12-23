@@ -172,37 +172,114 @@ const Sidebar = () => {
         };
     }, [context?.provider, context?.editor]);
 
-    const handleCreateDoc = useCallback((parentId?: string) => {
-        if (!context?.provider) return;
+    const handleCreateDoc = useCallback(async (parentId?: string) => {
+        console.log('handleCreateDoc called, parentId:', parentId);
+
+        if (!context?.provider) {
+            console.error('Context provider is missing');
+            return;
+        }
         const { collection } = context.provider;
+        const collectionId = collection.id;
 
-        // Set parent for the upcoming subdocs event (caught by our internal listener too)
-        context.provider.activeDocId = parentId || null;
+        console.log('Collection ID:', collectionId);
+        console.log('Collection type:', collection.constructor.name);
+        console.log('Collection docs count before:', collection.docs.size);
 
-        const newDoc = collection.createDoc();
+        // Set activeDocId to the PARENT (or collection ID for root-level docs)
+        context.provider.activeDocId = parentId || collectionId;
 
-        // Optimistically update local parent map if we have parentId
-        if (parentId) {
+        // Diagnostic log for schema
+        // @ts-ignore
+        console.log('Schema blocks count:', collection.schema.flavourSchemaMap?.size || 'unknown');
+
+        const newDocId = crypto.randomUUID();
+        console.log('Attempting to create doc with UUID:', newDocId);
+
+        // Create the new document with explicit ID to ensure success
+        let newDoc;
+        try {
+            newDoc = collection.createDoc({ id: newDocId });
+        } catch (error) {
+            console.error('createDoc threw:', error);
+        }
+
+        if (!newDoc) {
+            console.error('Failed to create new doc (returned null)');
+            // Attempt to diagnose
+            // @ts-ignore
+            if (collection.hasDoc && collection.hasDoc(newDocId)) {
+                console.warn('Collection says it HAS the doc, trying getDoc');
+                newDoc = collection.getDoc(newDocId);
+            } else {
+                // @ts-ignore
+                const docFromGet = collection.getDoc(newDocId);
+                if (docFromGet) {
+                    console.warn('hasDoc was false but getDoc returned it');
+                    newDoc = docFromGet;
+                } else {
+                    console.error('Collection does not have the doc');
+                }
+            }
+        }
+
+        if (!newDoc) {
+            return;
+        }
+
+        console.log('New Doc Created (Confirmed):', newDoc.id);
+
+        try {
+            // Persist the new document explicitly AND WAIT for it
+            await context.provider.storeDocument(newDoc.id, parentId || collectionId);
+
+            // Optimistically update local parent map
             setLocalParentMap(prev => {
                 const next = new Map(prev);
-                next.set(newDoc.id, parentId);
+                if (collectionId) {
+                    next.set(newDoc.id, parentId || collectionId);
+                }
                 return next;
             });
-        }
 
-        newDoc.load(() => {
-            const pageBlockId = newDoc.addBlock('affine:page', {});
-            newDoc.addBlock('affine:surface', {}, pageBlockId);
-            const noteId = newDoc.addBlock('affine:note', {}, pageBlockId);
-            newDoc.addBlock('affine:paragraph', {}, noteId);
-        });
-        newDoc.resetHistory();
+            // Initialize the document structure
+            newDoc.load(() => {
+                const pageBlockId = newDoc.addBlock('affine:page', {});
+                newDoc.addBlock('affine:surface', {}, pageBlockId);
+                const noteId = newDoc.addBlock('affine:note', {}, pageBlockId);
+                newDoc.addBlock('affine:paragraph', {}, noteId);
+            });
+            newDoc.resetHistory();
 
-        if (context.editor) {
-            context.editor.doc = newDoc;
-            context.provider.activeDocId = newDoc.id;
+            // NOW set the active document
+            if (context.editor) {
+                context.editor.doc = newDoc;
+                context.provider.activeDocId = newDoc.id;
+                context.setActiveDocId?.(newDoc.id);
+
+                // Force update sidebar docs list
+                // We use setTimeout to ensure Y.js has processed the addition if strictly async
+                setTimeout(() => {
+                    const refreshedDocs = Array.from(collection.docs.values()).map(d => d.getDoc());
+                    // Ensure new doc is in the list (sometimes delay in Yjs map)
+                    if (!refreshedDocs.find(d => d.id === newDoc.id)) {
+                        console.warn('New doc not in collection.docs yet, manually forcing add');
+                        refreshedDocs.push(newDoc);
+                    }
+                    console.log('Refreshing docs list, count:', refreshedDocs.length);
+                    setDocs(refreshedDocs);
+                }, 50);
+            }
+        } catch (e) {
+            console.error('Failed to init/store new document:', e);
+            // Optionally remove from collection if failed
+            try {
+                collection.removeDoc(newDoc.id);
+            } catch (cleanupErr) {
+                console.warn('Failed to cleanup doc after init error:', cleanupErr);
+            }
         }
-    }, [context?.provider, context?.editor]);
+    }, [context?.provider, context?.editor, context?.setActiveDocId]);
 
     const handleToggle = useCallback((docId: string) => {
         setCollapsed((prev) => ({
@@ -214,13 +291,14 @@ const Sidebar = () => {
     const handleSelect = useCallback((doc: Doc) => {
         if (context?.editor) {
             context.editor.doc = doc;
-            if (context.provider) {
+            if (context?.provider) {
                 context.provider.activeDocId = doc.id;
             }
+            context?.setActiveDocId?.(doc.id);
             // Trigger local state update to reflect selection in sidebar (isActive)
             setDocs(prev => [...prev]);
         }
-    }, [context?.editor, context?.provider]);
+    }, [context?.editor, context?.provider, context?.setActiveDocId]);
 
     const handleDelete = useCallback(async (doc: Doc) => {
         if (!confirm(`Are you sure you want to delete "${doc.meta?.title || 'Untitled'}" and all its sub-documents?`)) {
@@ -228,74 +306,79 @@ const Sidebar = () => {
         }
 
         try {
-            const response = await fetch(`/editor/documents/${doc.id}`, {
-                method: 'DELETE',
-                headers: {
-                    'X-CSRF-TOKEN': (document.querySelector('meta[name="csrf-token"]') as HTMLMetaElement)?.content || '',
-                },
-            });
+            if (!context?.provider) return;
 
-            if (!response.ok) {
-                const data = await response.json();
-                console.error('Failed to delete document from backend:', data.error);
-                alert(`Failed to delete document: ${data.error || 'Unknown error'}`);
-                return;
-            }
+            // Collect all IDs to remove (including children) for UI update
+            const idsToRemove = new Set<string>();
+            const collectIdsRecursively = (targetDoc: Doc) => {
+                idsToRemove.add(targetDoc.id);
+                const children = docs.filter(d => localParentMap.get(d.id) === targetDoc.id);
+                children.forEach(collectIdsRecursively);
+            };
+            collectIdsRecursively(doc);
 
-            if (context?.provider?.collection) {
-                const { collection } = context.provider;
-
-                // Collect all IDs to remove (including children)
-                const idsToRemove = new Set<string>();
-                const collectIdsRecursively = (targetDoc: Doc) => {
-                    idsToRemove.add(targetDoc.id);
-                    const children = docs.filter(d => localParentMap.get(d.id) === targetDoc.id);
-                    children.forEach(collectIdsRecursively);
-                };
-                collectIdsRecursively(doc);
-
-                // Remove from collection
-                idsToRemove.forEach(id => {
-                    try {
-                        collection.removeDoc(id);
-                    } catch (e) {
-                        console.warn(`Could not remove doc ${id} from collection:`, e);
-                    }
-                });
-
-                // Update local parent map
-                setLocalParentMap(prev => {
-                    const next = new Map(prev);
-                    idsToRemove.forEach(id => next.delete(id));
-                    return next;
-                });
-
-                // Update docs state
-                setDocs(prev => prev.filter(d => !idsToRemove.has(d.id)));
-
-                // If we deleted the active doc, switch to another one
-                if (context.editor && idsToRemove.has(context.editor.doc?.id || '')) {
-                    const remainingDocs = docs.filter(d => !idsToRemove.has(d.id));
-                    if (remainingDocs.length > 0) {
-                        context.editor.doc = remainingDocs[0];
-                        context.provider.activeDocId = remainingDocs[0].id;
-                    }
+            // If we deleted the active doc, switch to another one BEFORE removing it
+            if (context.editor && idsToRemove.has(context.editor.doc?.id || '')) {
+                const remainingDocs = docs.filter(d => !idsToRemove.has(d.id));
+                if (remainingDocs.length > 0) {
+                    context.editor.doc = remainingDocs[0];
+                    context.provider.activeDocId = remainingDocs[0].id;
+                    context.setActiveDocId?.(remainingDocs[0].id);
+                } else {
+                    context.provider.activeDocId = null;
+                    context.setActiveDocId?.(null);
                 }
             }
+
+            // Update local parent map
+            setLocalParentMap(prev => {
+                const next = new Map(prev);
+                idsToRemove.forEach(id => next.delete(id));
+                return next;
+            });
+
+            // Update docs state
+            setDocs(prev => prev.filter(d => !idsToRemove.has(d.id)));
+
+            // Use Provider to delete the document (it handles backend + stopping sync + collection removal)
+            // We recursively delete children first through provider if we really want to be safe,
+            // but the backend handles recursive deletion. Ideally, we just delete the root target.
+            // However, we should mark all children as "deleted" in provider so they stop syncing.
+            // The currently implemented deleteDocument only takes one ID.
+
+            // Let's rely on recursive backend deletion but we must silence sync for all of them.
+            // Since provider only has deleteDocument(id), we might need to iterate.
+            // BUT backend deletion is recursive. 
+            // Better to just delete the target doc via provider.
+            // And maybe we need to loop to mark all as deleted in provider if we want to be perfect?
+            // Actually, if we remove the root from collection, children are effectively removed from view 
+            // (though they might exist in Yjs map structure).
+
+            await context.provider.deleteDocument(doc.id);
+
+            // Note: Since backend does recursive delete, we don't strictly need to call deleteDocument 
+            // on children for the BACKEND, but we might want to for the "stop syncing" part.
+            // For now, let's assume removing the parent is enough to stop most noise.
 
         } catch (error) {
             console.error('Error deleting document:', error);
             alert('Error deleting document');
+            // Revert state if needed? (Complex, skipping for now)
         }
     }, [context?.provider, context?.editor, docs, localParentMap]);
 
     const rootDocs = useMemo(() => {
+        const collectionId = context?.provider?.collection.id;
         return docs.filter((d) => {
             const parentId = localParentMap.get(d.id);
-            // Root doc has no parent, OR parent is not in our known list (top level orphan)
+            // It is a root doc if:
+            // 1. It has no parent (orphan)
+            // 2. Its parent IS the collection ID (User Workspace)
+            // 3. Its parent is not found in the list (orphan)
+            if (collectionId && parentId === collectionId) return true;
             return !parentId || !docs.find(existing => existing.id === parentId);
         });
-    }, [docs, localParentMap]);
+    }, [docs, localParentMap, context?.provider?.collection.id]);
 
     return (
         <div className="editor-sidebar flex flex-col h-full border-r border-gray-200 bg-gray-50/50">
@@ -320,7 +403,7 @@ const Sidebar = () => {
                         parentMap={localParentMap}
                         onToggle={handleToggle}
                         onDelete={handleDelete}
-                        currentDocId={context?.editor?.doc?.id}
+                        currentDocId={context?.activeDocId || undefined}
                         onSelect={handleSelect}
                         onCreateSubDoc={(id) => handleCreateDoc(id)}
                     />

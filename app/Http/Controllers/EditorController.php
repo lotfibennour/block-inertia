@@ -16,42 +16,63 @@ class EditorController extends Controller
     /**
      * Display the editor page with initial data.
      */
+    /**
+     * Display the editor page with initial data.
+     */
     public function index(): InertiaResponse
     {
-        // Get root document or create one if none exists
-        $rootDoc = Document::whereNull('root_doc_id')->first();
+        $userId = \Auth::id();
+        
+        // Use a deterministic Workspace ID based on the User ID
+        // This effectively creates a "Per-User Workspace"
+        $rootDocId = "workspace-user-{$userId}";
 
-        if (!$rootDoc) {
-            // Create a new root document
-            $rootDocId = $this->generateDocId();
-            $rootDoc = Document::create([
-                'doc_id' => $rootDocId,
-                'root_doc_id' => null,
-            ]);
-        }
+        // Get only documents that belong to this user's workspace
+        // Documents belong to this collection if their root_doc_id matches the user's workspace ID
+        // OR if they ARE the workspace root itself (doc_id = $rootDocId)
+        // Fetch all documents recursively using a CTE
+        // This ensures grandfathered and deeply nested subdocuments are also retrieved
+        $query = "
+            WITH RECURSIVE doc_tree AS (
+                SELECT doc_id, root_doc_id
+                FROM documents
+                WHERE root_doc_id = ? OR doc_id = ?
+                UNION
+                SELECT d.doc_id, d.root_doc_id
+                FROM documents d
+                INNER JOIN doc_tree dt ON d.root_doc_id = dt.doc_id
+            )
+            SELECT doc_id, root_doc_id FROM doc_tree
+        ";
 
-        // Get all documents
-        $documents = Document::all()->map(function ($doc) {
+        $allDocs = \Illuminate\Support\Facades\DB::select($query, [$rootDocId, $rootDocId]);
+
+        $documents = collect($allDocs)->map(function ($doc) {
             return [
                 'doc_id' => $doc->doc_id,
                 'root_doc_id' => $doc->root_doc_id,
             ];
         });
 
-        // Get all updates grouped by document
-        $updates = DocumentUpdate::all()->groupBy('doc_id')->map(function ($group) {
-            return $group->map(function ($update) {
-                $data = $update->data;
-                if (is_resource($data)) {
-                    $data = stream_get_contents($data);
-                }
-                return base64_encode($data);
-            })->values();
-        });
+        // Get all updates grouped by document, but filter only for relevant docs
+        // We fetch ALL updates for simplicity in this prototype, but ideally distinct by doc_id
+        $knownDocIds = $documents->pluck('doc_id');
+        $updates = DocumentUpdate::whereIn('doc_id', $knownDocIds)
+            ->get()
+            ->groupBy('doc_id')
+            ->map(function ($group) {
+                return $group->map(function ($update) {
+                    $data = $update->data;
+                    if (is_resource($data)) {
+                        $data = stream_get_contents($data);
+                    }
+                    return base64_encode($data);
+                })->values();
+            });
 
         return Inertia::render('editor', [
             'initialData' => [
-                'rootDocId' => $rootDoc->doc_id,
+                'rootDocId' => $rootDocId,
                 'documents' => $documents,
                 'updates' => $updates,
             ],
@@ -84,6 +105,7 @@ class EditorController extends Controller
         $validated = $request->validate([
             'doc_id' => 'required|string',
             'data' => 'required|string', // base64 encoded
+            'root_doc_id' => 'nullable|string', // Optional parent ID
         ]);
 
         // Decode base64 to binary stream
@@ -92,6 +114,30 @@ class EditorController extends Controller
         fwrite($stream, $binaryData);
         rewind($stream);
         $validated['data'] = $stream;
+
+        // Auto-create document if it doesn't exist (handling subdocs created by editor)
+        if (!Document::where('doc_id', $validated['doc_id'])->exists()) {
+            $userId = \Auth::id();
+            if ($userId) {
+                // Determine appropriate parent
+                $rootDocId = $request->input('root_doc_id');
+                
+                // If no specific parent provided, assign to user's workspace root
+                if (!$rootDocId) {
+                    $rootDocId = "workspace-user-{$userId}";
+                }
+
+                Document::create([
+                    'doc_id' => $validated['doc_id'],
+                    'root_doc_id' => $rootDocId
+                ]);
+            } else {
+                 return response()->json(['error' => 'Unauthorized'], 401);
+            }
+        }
+
+        // We don't save root_doc_id in the update table, it's just for the document structure
+        unset($validated['root_doc_id']);
 
         DocumentUpdate::create($validated);
 

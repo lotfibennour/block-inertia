@@ -4,7 +4,7 @@ export interface EditorDocument {
 }
 
 export interface EditorInitialData {
-    rootDocId: string;
+    rootDocId: string | null;
     documents: EditorDocument[];
     updates: Record<string, string[]>; // doc_id -> array of base64 encoded updates
 }

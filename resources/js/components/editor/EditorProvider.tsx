@@ -16,11 +16,15 @@ export const EditorProvider = ({
 }: EditorProviderProps) => {
     const [editor, setEditor] = useState<AffineEditorContainer | null>(null);
     const [provider, setProvider] = useState<CollectionProvider | null>(null);
+    const [activeDocId, setActiveDocId] = useState<string | null>(null);
 
     useEffect(() => {
         initEditor(initialData).then(({ editor, provider }) => {
             setEditor(editor);
             setProvider(provider);
+            if (provider.activeDocId) {
+                setActiveDocId(provider.activeDocId);
+            }
         });
     }, [initialData]);
 
@@ -30,6 +34,8 @@ export const EditorProvider = ({
                 editor,
                 provider,
                 initialData,
+                activeDocId,
+                setActiveDocId
             }}
         >
             {editor && provider ? children : <div className="editor-loading">Loading Editor...</div>}
